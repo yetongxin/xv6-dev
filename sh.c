@@ -12,6 +12,11 @@
 #define BACK  5
 
 #define MAXARGS 10
+char currentDir[256];
+char parentDir[256];
+int isRootDir = 1;
+
+char pathroute[100] = "/";
 
 struct cmd {
   int type;
@@ -75,8 +80,34 @@ runcmd(struct cmd *cmd)
     ecmd = (struct execcmd*)cmd;
     if(ecmd->argv[0] == 0)
       exit();
+
+    if (ecmd->argv[0][0] == 'v' && ecmd->argv[0][1] == 'i' && ecmd->argv[0][2] == 'm' && ecmd->argv[0][3] == 0)
+    {
+      if (ecmd ->argv[1] == 0 || ecmd ->argv[2] != 0)
+      {
+        printf(1, "please input the command as [vim file_name]\n");
+        exit();
+      }
+	
+      ecmd -> argv[2] = currentDir;
+      char *dir = currentDir;
+      chdir(dir);	
+      int fd;
+      // printf(1, "open file=============== %s\n", ecmd->argv[1]);
+      if ((fd = open(ecmd->argv[1], O_RDWR)) < 0)
+      {
+        printf(1, "vim: cannot open %s\n", ecmd -> argv[1]);
+        chdir("/");
+        exit();
+      }
+      close(fd);
+      chdir("/");
+    }   
+
     exec(ecmd->argv[0], ecmd->argv);
-    printf(2, "exec %s failed\n", ecmd->argv[0]);
+    
+    if(ecmd->argv[0][0] == '/')
+      printf(2, "exec %s failed\n", ecmd->argv[0]+1);
     break;
 
   case REDIR:
@@ -127,13 +158,14 @@ runcmd(struct cmd *cmd)
       runcmd(bcmd->cmd);
     break;
   }
-  exit();
+  //exit();
+  return;
 }
 
 int
 getcmd(char *buf, int nbuf)
 {
-  printf(2, "$ ");
+  printf(2, "%s$ ", currentDir);
   memset(buf, 0, nbuf);
   gets(buf, nbuf);
   if(buf[0] == 0) // EOF
@@ -141,10 +173,51 @@ getcmd(char *buf, int nbuf)
   return 0;
 }
 
+// Reference: 2011 xv6
+void 
+strcopy(char * dest, char * src)
+{
+  int n = strlen(src);
+  int i;
+  for (i = 0; i < n; i++) {
+    dest[i] = src[i];
+  }
+  dest[i] = 0;
+}
+
+void
+catenate(char * dest, char * src)
+{
+  int i;
+  int j;
+  for (i=strlen(dest), j=0; src[j]; i++,j++){
+    dest[i] = src[j];
+  }
+  dest[i] = 0;
+}
+
+void
+append(char * dest, char ch)
+{
+  int i;
+  i = strlen(dest);
+  dest[i] = ch;
+  dest[i+1] = 0;
+}
+// End of reference
+void cutChild(char * str)
+{
+    int i;
+    for(i = strlen(str); str[i] != '/' && i > 0; i--){
+    }
+    str[i] = 0;
+}
+
 int
 main(void)
 {
   static char buf[100];
+  static char bufCNM[100];
   int fd;
   
   // Assumes three file descriptors open.
@@ -163,10 +236,37 @@ main(void)
       buf[strlen(buf)-1] = 0;  // chop \n
       if(chdir(buf+3) < 0)
         printf(2, "cannot cd %s\n", buf+3);
+      else{
+        if((buf + 3)[0] == '.' && (buf + 3)[1] == '.' && (buf + 3)[2] == 0){
+            cutChild(currentDir);
+            if(currentDir[0] == 0) isRootDir = 1;
+            continue;
+        }
+        if(isRootDir){
+            catenate(currentDir, buf + 3);
+            isRootDir = 0;
+        }
+        else{
+            append(currentDir, '/');
+            catenate(currentDir, buf + 3);
+        }
+      }
       continue;
     }
-    if(fork1() == 0)
+
+    if(fork1() == 0) {
+      int i;
+      int len = strlen(buf);
+      for(i = len + 1; i > 0; i--) {
+        bufCNM[i] = buf[i-1];        
+      }   
+      bufCNM[0] = '/';
       runcmd(parsecmd(buf));
+      if(buf[0] != '/') {
+        runcmd(parsecmd(bufCNM));
+      }
+      exit();
+    }
     wait();
   }
   exit();

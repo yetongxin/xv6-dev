@@ -6,10 +6,33 @@
 #include "defs.h"
 #include "x86.h"
 #include "elf.h"
+#include "execvim.h"
+
+void            cprintf(char*, ...);
+
+#define MAX_CONTENT_LEN  2000
+int execvim;
+char content[MAX_CONTENT_LEN];
 
 int
 exec(char *path, char **argv)
 {
+  // cprintf("exec============, %s\n", path);
+  execvim = 0;
+  if (path[0] == 'v' && path[1] == 'i' && path[2] == 'm' && path[3] == 0)
+  {
+    if (argv[1] && argv[2] && !argv[3])
+    {
+      // cprintf("exec here============, %s %s %s\n", argv[1], argv[2], argv[3]);
+
+       execvim = 1;
+       while (execvim);
+       argv[3] = content;
+    }
+    else
+      return 0;
+  }
+
   char *s, *last;
   int i, off;
   uint argc, sz, sp, ustack[3+MAXARG+1];
@@ -18,8 +41,11 @@ exec(char *path, char **argv)
   struct proghdr ph;
   pde_t *pgdir, *oldpgdir;
 
-  if((ip = namei(path)) == 0)
+  // begin_op();
+  if((ip = namei(path)) == 0){
+    // end_op();
     return -1;
+  }
   ilock(ip);
   pgdir = 0;
 
@@ -47,6 +73,7 @@ exec(char *path, char **argv)
       goto bad;
   }
   iunlockput(ip);
+  // end_op();
   ip = 0;
 
   // Allocate two pages at the next page boundary.
@@ -95,7 +122,9 @@ exec(char *path, char **argv)
  bad:
   if(pgdir)
     freevm(pgdir);
-  if(ip)
+  if(ip){
     iunlockput(ip);
+    // end_op();
+  }
   return -1;
 }

@@ -13,6 +13,59 @@
 #include "mmu.h"
 #include "proc.h"
 #include "x86.h"
+#include "execvim.h"
+//#include "user.h"
+
+//Test for history recording
+#define MAX_HISTORY 3
+#define MAX_CMD 100
+
+char cmdlist[100][100];
+int tab_times = 0;
+int match_length = 0;
+
+extern char pathroute[100];
+
+
+struct history
+{
+	char cmds[MAX_HISTORY][MAX_CMD];
+	int current;
+    int record;
+    int flag;
+    int pos;
+    int recordNum;
+};
+struct history his = {.current = 0, .record = 0, .flag = 0, .pos = 0, .recordNum = 0};
+
+int recordHistory(char* cmd)
+{
+	int i;
+    if(his.recordNum < MAX_HISTORY) his.recordNum++;
+	for(i = 0; i < MAX_CMD; i++)
+	{
+		his.cmds[his.current][i] = cmd[i];
+        if(cmd[i] == '\0') break;
+	}
+	his.current++;
+    if(his.current >= MAX_HISTORY)
+	{
+		his.current = 0;
+	}
+    his.record = 1;
+	return 0;
+}
+
+char* fetchHistory()
+{
+	return his.cmds[his.current];
+}
+
+int len;
+char str[MAX_CMD];
+//End
+
+#define NULL 0x0
 
 static void consputc(int);
 
@@ -126,6 +179,28 @@ panic(char *s)
 #define CRTPORT 0x3d4
 static ushort *crt = (ushort*)P2V(0xb8000);  // CGA memory
 
+//Test for left and right arrow
+char buffer[MAX_CMD];
+int bufferPos = 0;
+
+int concatInput()
+{
+    int i = bufferPos;
+    int pos;
+    outb(CRTPORT, 14);
+    pos = inb(CRTPORT+1) << 8;
+    outb(CRTPORT, 15);
+    pos |= inb(CRTPORT+1);
+    for(i = bufferPos - 1; i >= 0; i--)
+    {
+        crt[pos++] = (buffer[i] & 0xff) | 0x0700;
+    }
+    //printint(pos, 10, 1);
+    crt[pos] = ' ' | 0x0700;
+    return 0;
+}
+//
+
 static void
 cgaputc(int c)
 {
@@ -141,8 +216,16 @@ cgaputc(int c)
     pos += 80 - pos%80;
   else if(c == BACKSPACE){
     if(pos > 0) --pos;
-  } else
-    crt[pos++] = (c&0xff) | 0x0700;  // black on white
+  } //else if(c == '\t') crt[pos++] = ('l'&0xff) | 0x700;
+  //Test
+  else if(c == 0xe4){
+    if(pos > 0){
+        --pos;
+        buffer[bufferPos++] = crt[pos];
+    }
+  }
+  //
+         else crt[pos++] = (c&0xff) | 0x0700;  // black on white
   
   if((pos/80) >= 24){  // Scroll up.
     memmove(crt, crt+80, sizeof(crt[0])*23*80);
@@ -154,7 +237,7 @@ cgaputc(int c)
   outb(CRTPORT+1, pos>>8);
   outb(CRTPORT, 15);
   outb(CRTPORT+1, pos);
-  crt[pos] = ' ' | 0x0700;
+  if(c != 0xe4) crt[pos] = ' ' | 0x0700;
 }
 
 void
@@ -184,18 +267,348 @@ struct {
 
 #define C(x)  ((x)-'@')  // Control-x
 
+int getCommondList() {
+    struct inode *ip = namei("/");
+    struct dirent de;
+    int i = 0;
+    int j = 0;
+    char file_path[100];
+    file_path[0] = '/';
+    while (1) {
+       readi(ip, (char*)&de, sizeof(de)*i, sizeof(de));
+       if(de.inum == 0)
+           break;
+       memmove(file_path + 1, de.name, DIRSIZ);
+       file_path[1 + DIRSIZ] = 0;
+       struct inode *singlefile = namei(file_path);
+       //cprintf("%d %d %d\n", temp, de.inum, singlefile -> type);
+       if(singlefile -> type == 0 || singlefile -> type == 2) {
+           strncpy(cmdlist[j], de.name, DIRSIZ);
+           //cprintf("%s \n", cmdlist[j]);
+           j++;
+       } 
+       //cprintf("%d ", singlefile -> type);
+       //cprintf("%s \n", file_path);
+       i++;
+    }
+    //ip = proc->cwd;    
+    //int x = ip->type;
+    //cprintf("%d %s", x, de.name);
+    return j;
+}
+
+char* match_commond(char* commondPrefix) {
+    //consputc(strlen(commondPrefix)+'0');
+    int i = 0;
+	int j = 0;
+    int num = 0;
+    num = getCommondList();
+    int flag = 0;
+    char* firstmatch = NULL;
+	//cprintf("%s\n", commondPrefix);
+    while (j != num) {
+        i = 0; 
+		//cprintf("%d %s\n", j, cmdlist[j]);
+        if (strlen(cmdlist[j]) < strlen(commondPrefix)) {j++; continue;}
+        while (i < strlen(commondPrefix)) if (cmdlist[j][i] == commondPrefix[i]) i++; else break;
+        if (i >= strlen(commondPrefix)) {
+			if (flag == 0) firstmatch = cmdlist[j];
+			flag++; 
+            if(flag == tab_times) return cmdlist[j];
+ 		}
+        j++;
+        //num--;
+    }
+    //cprintf("%d %d %d\n", flag, tab_times, num);
+    if (flag < tab_times) {tab_times = 1;  return firstmatch;}	else return NULL;
+}
+
+int firstVim = 1;
+int startPos;
+int endPos;
+
+int checkVimStart(int pos)
+{
+  return 
+  (pos >= 0) && (crt[pos] != (('$' & 0xff) |0x0700)
+  || crt[pos+1]!= ((' ' & 0xff) |0x0700)
+  || crt[pos+2]!= (('v' & 0xff) |0x0700)
+  || crt[pos+3]!= (('i' & 0xff) |0x0700)
+  || crt[pos+4]!= (('m' & 0xff) |0x0700)
+  || crt[pos+5]!= ((' ' & 0xff) |0x0700));
+}
+
 void
 consoleintr(int (*getc)(void))
 {
   int c;
+  int i;
+  if (execvim == 1)
+  {
+     acquire(&input.lock);
+     while((c = getc()) >= 0){
+	int filePos;
+	if (c != 0)
+	{
+	  outb(CRTPORT, 14);
+	  filePos = inb(CRTPORT+1) << 8;
+	  outb(CRTPORT, 15);
+	  filePos |= inb(CRTPORT+1);
+	
+	  if (firstVim)
+	  {
+	    endPos =filePos;
+      if (endPos % 80 !=0)
+        endPos =filePos +80 - filePos % 80;
+      for (startPos = filePos - filePos % 80; checkVimStart(startPos); startPos --);
+      if (startPos < 0)
+        startPos = 0;
+      else
+        startPos += 80 - startPos % 80;
+      if (startPos == endPos)
+      {
+        int i;
+        for (i= startPos; i<startPos+80; i++)
+          crt[i] = (' '&0xff) | 0x0700;
+        endPos += 80;
+      }
+      firstVim = 0;
+      filePos = startPos;
+	  }
+  }
 
+  if (c != 0x1B && c!= 0)
+  {
+	  switch (c){
+        //up
+	  case 0xe2:
+      if (filePos >= startPos + 80)
+        filePos -= 80;
+            break;
+
+	//down
+    case 0xe3:
+	  if (filePos < endPos - 80)
+		filePos += 80;
+          break;
+
+	//left
+        case 0xe4:
+	  if (filePos > startPos )
+		filePos--;
+          break;
+	
+	//right
+	case 0xe5:
+	  if (filePos < endPos-1 )
+		filePos++;
+          break;
+	
+	case '\n':
+	  if (endPos == 23*80 )
+	  {
+	    memmove(crt, crt+80, sizeof(crt[0])*(filePos/80)*80);
+	    int i;
+	    for (i = (filePos/80)*80; i< (filePos/80)*80 +80; i++)
+		crt[i] = (' '&0xff) | 0x700;
+	    startPos -= 80;
+	  }
+	  else 
+	  {
+	    filePos += 80 - filePos%80;
+	    memmove(crt+filePos+80, crt+filePos, sizeof(crt[0])*(endPos-filePos));
+	    int i;
+            for (i = filePos; i<filePos+80; i++)
+		crt[i] = (' '&0xff) | 0x700;
+            endPos += 80; 
+	  }
+	  filePos -= filePos%80; 
+          break;
+	case C('H'):
+	  if (filePos > startPos)
+	  {
+	    int i;
+            int rmline = 1;
+
+		if (crt[filePos] != ((' '&0xff) | 0x0700))
+		{
+		  rmline = 0;
+
+		}
+	    if (crt[filePos]  == ((' '&0xff) | 0x0700) && filePos % 80 ==0  && rmline)
+	    {
+		memmove(crt+filePos, crt+filePos+80, sizeof(crt[0])*(endPos-filePos-80));
+		for (i = endPos -80; i< endPos; i++)
+		  crt[i] = (' '&0xff) | 0x0700;
+		endPos -= 80;
+		while (crt[--filePos] == ((' '&0xff) | 0x0700) && filePos %80 != 0);
+		if (crt[filePos] != ((' '&0xff) | 0x0700))
+		  filePos ++;
+	    }
+	    else
+	    {
+		crt[--filePos] = ((' '&0xff) | 0x0700);
+                for (i = filePos; i< endPos; i++)
+		{
+		  if (i % 80 ==79 && crt[i] == ((' '&0xff) | 0x0700))
+			break;
+		  crt[i] = crt[i+1];
+		}
+		if (filePos % 80 == 79){
+		  while (crt[--filePos] == ((' '&0xff) | 0x0700) && filePos % 80 !=0);
+		  if (filePos % 80 == 0 && crt[filePos] == ((' '&0xff) | 0x0700))
+		  {
+		    memmove(crt+filePos, crt+filePos+80, sizeof(crt[0])*(endPos-filePos-80));
+		    for (i= endPos -80; i < endPos; i++)
+			crt[i] = ((' '&0xff) | 0x0700);
+		    endPos -= 80;
+		  }
+		  else
+		    filePos++;
+		}
+	    }
+          }
+	  break;
+	
+	default:
+	  i = filePos + 79 - filePos % 80;
+	  while (crt[i] != ((' '&0xff) | 0x0700))
+	    i += 80;
+          if (i < endPos)
+	  {
+	    for (; i > filePos; i--)
+              crt[i] = crt[i-1];
+	  }
+	  else
+          {
+	    i = filePos + 80 - filePos % 80;
+	    memmove(crt+i+80, crt+i, sizeof(crt[0])*(endPos-i));
+	    int j;
+	    for (j = i; j < i + 80; j++)
+		crt[j] = (' '&0xff) | 0x0700;
+	    for (; i > filePos; i--)
+		crt[i] = crt[i-1];
+	    endPos += 80;
+	  }
+	  crt[filePos ++] = (c&0xff) | 0x0700;
+	  break;
+	}
+	if ((endPos/80) >= 24){
+	  memmove(crt, crt+80, sizeof(crt[0])*80*23);
+	  startPos -= 80;
+	  endPos -= 80;
+	  filePos -= 80;
+	  int i;
+	  for (i = endPos; i< endPos +80; i++)
+	    crt[i] = (' '&0xff) | 0x0700;
+	}
+	
+	outb(CRTPORT, 14);
+	outb(CRTPORT+1, filePos>>8);
+	outb(CRTPORT, 15);
+	outb(CRTPORT+1, filePos);
+
+	}
+
+	else if (c != 0)
+	{
+    // cprintf("============ ESC CLICK");
+	  firstVim = 1;
+	  int i ,j;
+	  memset(content, 0, sizeof(char)*2000);
+	  for (i = startPos, j=0; i< endPos; i++)
+	  {
+      // cprintf("%s, %s, %s", crt[i] & 0x0700, ((' '&0xff) | 0x0700), crt[i]);
+	    if (crt[i] != ((' '&0xff) | 0x0700))
+	    {
+		content[j++] = crt[i] & 0x00ff;
+	    }
+	    else
+	    {
+	      int k;
+	      for (k= i+1; (k%80) != 0 && crt[k] == ((' '&0xff) | 0x0700); k++);
+	      if (k % 80 == 0)
+	      {
+		content[j++] = '\n';
+		i = k - 1;
+	      }
+	      else
+	      {
+		for (; crt[i] == ((' '&0xff) | 0x0700); i++)
+		  content[j++] = ' ';
+		i--;
+	      }
+	    }
+	  }
+	    content[j++] = 0;
+	    outb(CRTPORT, 14);
+	    outb(CRTPORT+1, endPos >> 8);
+	    outb(CRTPORT, 15);
+	    outb(CRTPORT+1, endPos);
+	    execvim = 0;
+      cprintf("%s", content);
+
+	}
+    }
+    release(&input.lock);
+    return;	
+  }
+  else 
+  {
   acquire(&input.lock);
+  char commondPrefix[INPUT_BUF];
+  int length;
   while((c = getc()) >= 0){
+    if(c != '\t' && c != 0) {tab_times = 0;}
     switch(c){
     case C('P'):  // Process listing.
+      his.flag = 0;//history flag
+      bufferPos = 0;
       procdump();
       break;
+    case '\t':
+      bufferPos = 0;
+      his.flag = 0;//history flag
+      if (input.e != input.w) {
+      	  tab_times ++;
+          //cprintf("%d %d", tab_times, match_length);
+          if (tab_times == 1) {
+              match_length = 0;
+          } 
+          else {
+              while (match_length != 0) {
+                  if(input.e != input.w){
+                      input.e--;
+                      consputc(BACKSPACE);
+                      if(len > 0) len--;
+	                  concatInput();
+                  }
+                  match_length--;
+              }
+          }
+          i = input.e - 1;
+          while (input.buf[i % INPUT_BUF] != ' ' && i != input.w) i--;
+          length = 0;
+          while (i != input.e) commondPrefix[length++] = input.buf[i++ % INPUT_BUF];
+          commondPrefix[length++] = '\0';
+          //cprintf("%s %d", commondPrefix, tab_times);
+          char* match_ans;
+          match_ans = match_commond(commondPrefix);
+          if (match_ans != NULL) {
+              i = length - 1;
+              while (match_ans[i] != '\0') {
+                  input.buf[input.e++ % INPUT_BUF] = match_ans[i];
+                  str[len++] = match_ans[i];
+                  consputc(match_ans[i++]);
+                  match_length++;
+                  //cprintf("%d", match_length);
+              }
+          } 
+      }
+      break;
     case C('U'):  // Kill line.
+      his.flag = 0;//history flag
+      bufferPos = 0;
       while(input.e != input.w &&
             input.buf[(input.e-1) % INPUT_BUF] != '\n'){
         input.e--;
@@ -206,8 +619,123 @@ consoleintr(int (*getc)(void))
       if(input.e != input.w){
         input.e--;
         consputc(BACKSPACE);
+        if(len > 0) len--;
+        concatInput();
       }
       break;
+    //case 0xE2: Test for up key
+	case 0xE2:
+        if (his.recordNum == 0)
+           continue;
+        if(his.flag == 0)
+        {
+            his.pos = his.current - 1;
+            if (his.pos < 0) 
+                his.pos = his.recordNum-1;
+            his.flag = 1;
+        }
+        else
+        {
+            if (his.pos  == his.current )
+               continue;
+            if (his.recordNum < MAX_HISTORY && his.pos == 0)
+               continue;
+            his.pos--;
+            if (his.pos < 0)
+               his.pos = his.recordNum-1;
+
+        }
+	bufferPos = 0;
+	    if(his.record == 1)
+	    {
+            while(input.e != input.w &&
+            input.buf[(input.e-1) % INPUT_BUF] != '\n'){
+                input.e--;
+                consputc(BACKSPACE);
+            }
+
+            len = 0;
+		    int i;
+
+		    for(i = 0; i < (sizeof(his.cmds[his.pos]) / sizeof(char)); i++)
+		    {
+                if(his.cmds[his.pos][i] == '\0') break;
+			    input.buf[input.e++ % INPUT_BUF] = his.cmds[his.pos][i];
+			    consputc(his.cmds[his.pos][i]);
+                str[len++] = his.cmds[his.pos][i];
+		    }
+
+	    }
+	  break;
+    //case 0xE3: Test for down key
+    case 0xE3:	
+           if (his.recordNum == 0)
+              continue;
+            if(his.flag == 0)
+            {
+               continue;
+            }
+            else
+            {
+                int now;
+                now = his.current - 1;
+                if (now < 0)
+                   now = his.recordNum-1; 
+                if (his.pos  == now)
+                   continue;
+                if (his.recordNum < MAX_HISTORY && his.pos == his.recordNum - 1)
+                   continue;
+                his.pos++;
+                if (his.pos >= his.recordNum)
+                   his.pos = 0; 
+            }
+	    bufferPos = 0;
+			if(his.record == 1)
+			{
+                while(input.e != input.w &&
+                input.buf[(input.e - 1) % INPUT_BUF] != '\n'){
+                    input.e--;
+                    consputc(BACKSPACE);
+                }
+
+                len = 0;
+				int i;
+
+				for(i = 0; i < (sizeof(his.cmds[his.pos]) / sizeof(char)); i++)
+				{
+                    if(his.cmds[his.pos][i] == '\0') break;
+					input.buf[input.e++ % INPUT_BUF] = his.cmds[his.pos][i];
+					consputc(his.cmds[his.pos][i]);
+                    str[len++] = his.cmds[his.pos][i];
+				}
+			}
+	  break; 
+  //Test
+	case 0xE4:
+	    if(input.e != input.w){
+        input.e--;
+        //consputc(BACKSPACE);
+        consputc(0xe4);
+        if(len > 0) len--;
+      }
+      break;
+    /*
+    case 0xE5:
+      if (bufferPos > 0)
+      {
+          input.buf[input.e++ % INPUT_BUF] = buffer[bufferPos-1];
+          str[len++] = buffer[bufferPos-1];//Preparation for building a history record
+          consputc(buffer[bufferPos-1]);
+          bufferPos --;
+          concatInput();
+      }
+ 
+       
+	
+      break;
+    */
+  //
+    /*
     default:
       if(c != 0 && input.e-input.r < INPUT_BUF){
         c = (c == '\r') ? '\n' : c;
@@ -219,9 +747,51 @@ consoleintr(int (*getc)(void))
         }
       }
       break;
+    */
+    case 0xE5:
+	if (bufferPos > 0)
+	{
+		bufferPos --;
+	    	input.buf[input.e++ % INPUT_BUF] = buffer[bufferPos];
+		str[len++] = buffer[bufferPos];//Preparation for building a history record
+		consputc(buffer[bufferPos]);
+		concatInput();
+	}
+	break;
+
+    default:
+      if(c != 0 && input.e-input.r < INPUT_BUF){
+        c = (c == '\r') ? '\n' : c;
+        if(c == '\n'){
+            int i;
+      		for(i = bufferPos - 1; i >= 0; i--)
+		    {
+			    input.buf[input.e++ % INPUT_BUF] = buffer[i];
+			    str[len++] = buffer[i];
+		    }
+		    bufferPos = 0;
+		}    
+        input.buf[input.e++ % INPUT_BUF] = c;
+        str[len++] = c;//Preparation for building a history record
+        consputc(c);
+        if(c == '\n' || c == C('D') || input.e == input.r + INPUT_BUF){
+          his.flag = 0;
+          input.w = input.e;
+          str[len - 1] = '\0';//Add a '\0' in the end
+          recordHistory(str);
+          len = 0;//reset len for the next recording preparation
+          wakeup(&input.r);
+        }
+        else{
+            concatInput();
+        }
+      }
+	
+      break;
     }
   }
   release(&input.lock);
+  }
 }
 
 int
@@ -290,4 +860,3 @@ consoleinit(void)
   picenable(IRQ_KBD);
   ioapicenable(IRQ_KBD, 0);
 }
-
